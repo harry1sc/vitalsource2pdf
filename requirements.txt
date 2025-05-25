@@ -2,7 +2,8 @@ selenium
 webdriver-manager
 tqdm
 pillow
-selenium-wire
+selenium-wire==5.1.0
 img2pdf
 PyPDF2
+blinker==1.4
 git+https://github.com/lovasoa/pagelabels-py.git

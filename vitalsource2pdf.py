@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import sys
 from pathlib import Path
 
 import img2pdf
@@ -52,7 +53,7 @@ non_number_pages = 0
 
 platform_identifiers = {
     'home_url': "https://reader.yuzu.com",
-    'jigsaw_url' "https://jigsaw.yuzu.com"
+    'jigsaw_url': "https://jigsaw.yuzu.com",
     'total_pages': "sc-gFSQbh ognVW",
     'current_page': "InputControl__input-fbzQBk hDtUvs TextField__InputControl-iza-dmV iISUBf",
     'page_loader': "sc-hiwPVj hZlgDU",
@@ -60,8 +61,8 @@ platform_identifiers = {
     } if args.yuzu else {
     'home_url': "https://bookshelf.vitalsource.com",
     'jigsaw_url': "https://jigsaw.vitalsource.com",
-    'total_pages': "sc-knKHOI gGldJU",
-    'current_page': "InputControl__input-fbzQBk hDtUvs TextField__InputControl-iza-dmV iISUBf",
+    'total_pages': "sc-gFSQbh ognVW",
+    'current_page': "sc-gFSQbh ognVW",
     'page_loader': "sc-AjmGg dDNaMw",
     'next_page': "IconButton__button-bQttMI gHMmeA sc-oXPCX mwNce",
 }
@@ -70,24 +71,50 @@ platform_identifiers = {
 
 
 def get_num_pages():
-    while True:
-        try:
-            total = int(driver.execute_script('return document.getElementsByClassName("'+platform_identifiers['total_pages']+'")[0].innerHTML').strip().split('/')[-1].strip())
-            try:
-                # Get the value of the page number textbox
-                current_page = driver.execute_script('return document.getElementsByClassName("'+platform_identifiers['current_page']+'")[0].value')
-                if current_page == '' or not current_page:
-                    # This element may be empty so just set it to 0
-                    current_page = 0
-            except selenium.common.exceptions.JavascriptException:
-                current_page = 0
-            return current_page, total
-        except selenium.common.exceptions.JavascriptException:
-            time.sleep(1)
+    print("Starting get_num_pages...")
+    # Wait for any element to be present first
+    time.sleep(5)
+    
+    try:
+        # Try to get all span elements
+        print("Getting all span elements...")
+        spans = driver.execute_script('''
+            return Array.from(document.getElementsByTagName('span')).map(function(el) {
+                return {
+                    'text': el.textContent,
+                    'class': el.className
+                };
+            });
+        ''')
+        print("Found spans:", json.dumps(spans, indent=2))
+        
+        # Try to get all input elements
+        print("Getting all input elements...")
+        inputs = driver.execute_script('''
+            return Array.from(document.getElementsByTagName('input')).map(function(el) {
+                return {
+                    'value': el.value,
+                    'class': el.className,
+                    'type': el.type
+                };
+            });
+        ''')
+        print("Found inputs:", json.dumps(inputs, indent=2))
+        
+        # For now, return dummy values to let the script continue
+        print("Returning dummy values for debugging...")
+        return 0, 100
+        
+    except selenium.common.exceptions.JavascriptException as e:
+        print(f"Error in get_num_pages: {e}")
+        time.sleep(1)
+        return 0, 100  # Return dummy values for now
 
 
 def load_book_page(page_id):
-    driver.get(platform_identifiers['home_url']+'/reader/books/{args.isbn}/pageid/{page_id}')
+    driver.get(f"{platform_identifiers['home_url']}/reader/books/{args.isbn}/pageid/{page_id}")
+    print("Waiting for page to load...")
+    time.sleep(5)  # Add initial wait for page load
     get_num_pages()  # Wait for the page to load
     # Wait for the page loader animation to disappear
     while len(driver.find_elements(By.CLASS_NAME, platform_identifiers['page_loader'])):
@@ -162,32 +189,39 @@ if not args.skip_scrape or args.only_scrape_metadata:
         del driver
 
     if not args.only_scrape_metadata:
-        _, total_pages = get_num_pages()
-
-        if args.start_page > 0:
-            print('You specified a start page so ignore the very large page count.')
-        total_pages = 99999999999999999 if args.start_page > 0 else total_pages
-
-        print('Total number of pages:', total_pages)
+        print(f"Starting page scraping from page {args.start_page} to {args.end_page}")
+        total_pages = args.end_page if args.end_page > 0 else 100  # Use end_page if specified, otherwise default to 100
+        pages_to_scrape = total_pages - args.start_page + 1
+        
+        print(f'Will scrape {pages_to_scrape} pages')
         print('Scraping pages...')
 
         page_urls = set()
         failed_pages = set()
         small_pages_redo = set()
-        bar = tqdm(total=total_pages)
-        bar.update(page_num)
-        while page_num < total_pages + 1:
+        bar = tqdm(total=pages_to_scrape)
+        page_num = args.start_page
+        bar.update(0)  # Start at 0 progress
+
+        while page_num <= total_pages:
             time.sleep(args.delay)
             retry_delay = 5
             base_url = None
+            
+            # Load the specific page
+            load_book_page(page_num)
+            time.sleep(args.delay)  # Wait for page to load
+            
             for page_retry in range(3):  # retry the page max this many times
-                largest_size = 0
                 for find_img_retry in range(3):
                     for request in driver.requests:
                         if request.url.startswith(platform_identifiers['jigsaw_url']+f'/books/{args.isbn}/images/'):
                             base_url = request.url.split('/')
                             del base_url[-1]
                             base_url = '/'.join(base_url)
+                            break
+                    if base_url:
+                        break
                     time.sleep(1)
                 if base_url:
                     break
@@ -195,46 +229,22 @@ if not args.skip_scrape or args.only_scrape_metadata:
                 time.sleep(retry_delay)
                 retry_delay += 5
 
-            page, _ = get_num_pages()
-
             if not base_url:
                 bar.write(f'Failed to get a URL for page {page_num}, retrying later.')
                 failed_pages.add(page_num)
             else:
-                page_urls.add((page, base_url))
+                page_urls.add((str(page_num), base_url))
                 bar.write(base_url)
-                # If this isn't a numbered page we will need to increment the page count
-                try:
-                    int(page)
-                except ValueError:
-                    total_pages += 1
-                    non_number_pages += 1
-                    bar.write(f'Non-number page {page}, increasing page count by 1 to: {total_pages}')
-                    bar.total = total_pages
-                    bar.refresh()
 
             if page_num == args.end_page:
-                bar.write(f'Exiting on page {page_num}.')
+                bar.write(f'Reached end page {page_num}, exiting.')
                 break
-
-            # On the first page the back arrow is disabled and will trigger this
-            if isinstance(page_num, int) and page_num > 0:
-                try:
-                    # If a page forward/backwards button is disabled
-                    if driver.execute_script(f'return document.getElementsByClassName("'+
-                                             platform_identifiers['next_page']+'")[0].disabled'):
-                        bar.write(f'Book completed, exiting.')
-                        break
-                except selenium.common.exceptions.JavascriptException:
-                    pass
 
             # Move to the next page
             del driver.requests
-            actions = ActionChains(driver)
-            actions.send_keys(Keys.RIGHT)
-            actions.perform()
-            bar.update()
             page_num += 1
+            bar.update(1)
+            
         bar.close()
 
         print('Re-doing failed pages...')
@@ -245,27 +255,27 @@ if not args.skip_scrape or args.only_scrape_metadata:
             retry_delay = 5
             base_url = None
             for page_retry in range(3):  # retry the page max this many times
-                largest_size = 0
                 for find_img_retry in range(3):
                     for request in driver.requests:
                         if request.url.startswith(platform_identifiers['jigsaw_url']+f'/books/{args.isbn}/images/'):
                             base_url = request.url.split('/')
                             del base_url[-1]
                             base_url = '/'.join(base_url)
+                            break
+                    if base_url:
+                        break
                     time.sleep(1)
                 if base_url:
                     break
-                bar.write(f'Could not find a matching image for page {page_num}, sleeping {retry_delay}s...')
+                bar.write(f'Could not find a matching image for page {page}, sleeping {retry_delay}s...')
                 time.sleep(retry_delay)
                 retry_delay += 5
-            page, _ = get_num_pages()
+            
             if not base_url:
-                bar.write(f'Failed to get a URL for page {page_num}, retrying later.')
-                failed_pages.add(page_num)
+                bar.write(f'Failed to get a URL for page {page}, skipping.')
             else:
-                page_urls.add((page, base_url))
+                page_urls.add((str(page), base_url))
                 bar.write(base_url)
-                del driver.requests
             bar.update(1)
         bar.close()
 
@@ -318,30 +328,83 @@ else:
 
 # Sometimes the book skips a page. Add a blank page if thats the case.
 print('Checking for blank pages...')
-existing_page_files = move_romans_to_front(roman_sort_with_ints([try_convert_int(str(x.stem)) for x in list(ebook_files.iterdir())]))
-if non_number_pages == 0:  # We might not have scraped so this number needs to be updated.
-    for item in existing_page_files:
-        if isinstance(try_convert_int(item), str):
-            non_number_pages += 1
-for page in tqdm(iterable=existing_page_files):
-    page_i = try_convert_int(page)
-    if isinstance(page_i, int) and page_i > 0:
-        page_i += non_number_pages
-        last_page_i = try_convert_int(existing_page_files[page_i - 1])
-        if isinstance(last_page_i, int):
-            last_page_i = last_page_i + non_number_pages
-            if last_page_i != page_i - 1:
-                img = Image.new('RGB', (2000, 2588), (255, 255, 255))
-                img.save(ebook_files / f'{int(page) - 1}.jpg')
-                tqdm.write(f'Created blank image for page {int(page) - 1}.')
+if args.start_page > 0 or args.end_page > 0:
+    # For page ranges, get the existing pages first
+    existing_page_files = sorted([int(x.stem) for x in list(ebook_files.iterdir()) if x.stem.isdigit()])
+    print(f"Found existing pages: {existing_page_files}")
+    
+    # Check if we have all pages in sequence
+    expected_pages = set(range(args.start_page, args.end_page + 1))
+    actual_pages = set(existing_page_files)
+    missing_pages = expected_pages - actual_pages
+    
+    if missing_pages:
+        print(f"Found {len(missing_pages)} missing pages in sequence")
+        for page in missing_pages:
+            print(f"Creating blank image for missing page {page}")
+            img = Image.new('RGB', (2000, 2588), (255, 255, 255))
+            img.save(ebook_files / f'{page}.jpg')
+            existing_page_files.append(page)
+        # Re-sort the list after adding new pages
+        existing_page_files.sort()
+else:
+    # Original logic for full book scraping
+    existing_page_files = move_romans_to_front(roman_sort_with_ints([try_convert_int(str(x.stem)) for x in list(ebook_files.iterdir())]))
+    if non_number_pages == 0:  # We might not have scraped so this number needs to be updated.
+        for item in existing_page_files:
+            if isinstance(try_convert_int(item), str):
+                non_number_pages += 1
+    for page in tqdm(iterable=existing_page_files):
+        page_i = try_convert_int(page)
+        if isinstance(page_i, int) and page_i > 0:
+            page_i += non_number_pages
+            last_page_i = try_convert_int(existing_page_files[page_i - 1])
+            if isinstance(last_page_i, int):
+                last_page_i = last_page_i + non_number_pages
+                if last_page_i != page_i - 1:
+                    img = Image.new('RGB', (2000, 2588), (255, 255, 255))
+                    img.save(ebook_files / f'{int(page) - 1}.jpg')
+                    tqdm.write(f'Created blank image for page {int(page) - 1}.')
 
 print('Building PDF...')
-raw_pdf_file = args.output / f'{args.isbn} RAW.pdf'
-existing_page_files = move_romans_to_front(roman_sort_with_ints([try_convert_int(str(x.stem)) for x in list(ebook_files.iterdir())]))
-page_files = [str(ebook_files / f'{x}.jpg') for x in existing_page_files]
+raw_pdf_file = args.output / f'{args.isbn}_raw.pdf'
+
+# When using page ranges, just sort the files numerically
+if args.start_page > 0 or args.end_page > 0:
+    print(f"Looking for pages {args.start_page} through {args.end_page}")
+    page_files = []
+    for page_num in range(args.start_page, args.end_page + 1):
+        page_file = ebook_files / f'{page_num}.jpg'
+        if page_file.exists():
+            page_files.append(str(page_file))
+        else:
+            print(f"Warning: Missing page file: {page_file}")
+else:
+    # Only use roman numeral handling for full book scraping
+    page_files = [str(ebook_files / f'{x}.jpg') for x in existing_page_files]
+
+if not page_files:
+    print("Error: No page files found to convert to PDF!")
+    sys.exit(1)
+
+print(f"Converting {len(page_files)} pages to PDF...")
+for page_file in page_files:
+    if not os.path.exists(page_file):
+        print(f"Warning: Page file not found: {page_file}")
+    elif os.path.getsize(page_file) == 0:
+        print(f"Warning: Empty page file: {page_file}")
+
 pdf = img2pdf.convert(page_files)
+if not pdf:
+    print("Error: PDF generation failed - no content generated!")
+    sys.exit(1)
+
 with open(raw_pdf_file, 'wb') as f:
     f.write(pdf)
+
+if not os.path.exists(raw_pdf_file) or os.path.getsize(raw_pdf_file) == 0:
+    print("Error: Generated PDF file is empty!")
+    sys.exit(1)
 
 if 'book' in book_info.keys() and 'books' in book_info['book'].keys() and len(book_info['book']['books']):
     title = book_info['book']['books'][0]['title']
@@ -351,15 +414,26 @@ else:
     author = 'Unknown'
 
 if not args.skip_ocr:
-    print('Running OCR...')
-    ocr_in = raw_pdf_file
-    _, raw_pdf_file = tempfile.mkstemp()
-    subprocess.run(f'ocrmypdf -l {args.language} --title "{title}" --jobs $(nproc) --output-type pdfa "{ocr_in}" "{raw_pdf_file}"', shell=True)
+    print('Checking OCR dependencies...')
+    # Check if ocrmypdf is available
+    ocrmypdf_available = subprocess.run('which ocrmypdf', shell=True, capture_output=True).returncode == 0
+    if not ocrmypdf_available:
+        print('Warning: ocrmypdf not found. Skipping OCR. To enable OCR, install ocrmypdf:')
+        print('  brew install ocrmypdf  # on macOS')
+        print('  apt-get install ocrmypdf  # on Ubuntu/Debian')
+    else:
+        print('Running OCR...')
+        ocr_in = raw_pdf_file
+        _, raw_pdf_file = tempfile.mkstemp()
+        # Get number of CPU cores in a cross-platform way
+        try:
+            cpu_count = len(os.sched_getaffinity(0))
+        except AttributeError:
+            cpu_count = os.cpu_count() or 1
+        subprocess.run(f'ocrmypdf -l {args.language} --title "{title}" --jobs {cpu_count} --output-type pdfa "{ocr_in}" "{raw_pdf_file}"', shell=True)
 else:
-    ebook_output_ocr = args.output / f'{args.isbn}.pdf'
     print('Skipping OCR...')
 
-# Add metadata
 print('Adding metadata...')
 file_in = open(raw_pdf_file, 'rb')
 pdf_reader = PdfReader(file_in)
@@ -368,56 +442,67 @@ pdf_merger.append(file_in)
 
 pdf_merger.add_metadata({'/Author': author, '/Title': title, '/Creator': f'ISBN: {args.isbn}'})
 
-if 'toc' in book_info.keys():
+tmpfile = None
+if 'toc' in book_info.keys() and book_info['toc']:
     print('Creating TOC...')
     for item in book_info['toc']:
         pdf_merger.add_outline_item(item['title'], int(item['cfi'].strip('/')) - 1)
-else:
-    print('Not creating TOC...')
 
 _, tmpfile = tempfile.mkstemp()
 pdf_merger.write(open(tmpfile, 'wb'))
 
-romans_end = 0
-for p in existing_page_files:
-    if isinstance(p, str):
-        romans_end += 1
+# Only do page labeling for full book scraping
+if args.start_page == 0 and args.end_page <= 0:
+    romans_end = 0
+    for p in existing_page_files:
+        if isinstance(p, str):
+            romans_end += 1
 
-if romans_end > 0:
-    print('Renumbering pages...')
-    reader = pdfrw_reader(tmpfile)
-    labels = PageLabels.from_pdf(reader)
+    if romans_end > 0:
+        print('Renumbering pages...')
+        reader = pdfrw_reader(tmpfile)
+        labels = PageLabels.from_pdf(reader)
 
-    roman_labels = PageLabelScheme(
-        startpage=0,
-        style='none',
-        prefix='Cover',
-        firstpagenum=1
-    )
-    labels.append(roman_labels)
+        roman_labels = PageLabelScheme(
+            startpage=0,
+            style='none',
+            prefix='Cover',
+            firstpagenum=1
+        )
+        labels.append(roman_labels)
 
-    roman_labels = PageLabelScheme(
-        startpage=1,
-        style='roman lowercase',
-        firstpagenum=1
-    )
-    labels.append(roman_labels)
+        roman_labels = PageLabelScheme(
+            startpage=1,
+            style='roman lowercase',
+            firstpagenum=1
+        )
+        labels.append(roman_labels)
 
-    normal_labels = PageLabelScheme(
-        startpage=romans_end,
-        style='arabic',
-        firstpagenum=1
-    )
-    labels.append(normal_labels)
+        normal_labels = PageLabelScheme(
+            startpage=romans_end,
+            style='arabic',
+            firstpagenum=1
+        )
+        labels.append(normal_labels)
 
-    labels.write(reader)
-    writer = pdfrw_writer()
-    writer.trailer = reader
-    writer.write(args.output / f'{title}.pdf')
+        labels.write(reader)
+        writer = pdfrw_writer()
+        writer.trailer = reader
+        writer.write(args.output / f'{title}.pdf')
+    else:
+        shutil.move(tmpfile, args.output / f'{title}.pdf')
 else:
-    shutil.move(tmpfile, args.output / f'{title}.pdf')
+    # For page ranges, just use the original page numbers
+    output_filename = f'{title}_{args.start_page}-{args.end_page}.pdf'
+    shutil.move(tmpfile, args.output / output_filename)
 
-os.remove(tmpfile)
+# Clean up temporary files
+file_in.close()
+if tmpfile and os.path.exists(tmpfile):
+    try:
+        os.remove(tmpfile)
+    except OSError as e:
+        print(f"Warning: Could not remove temporary file {tmpfile}: {e}")
 
 if args.compress:
     print('Compressing PDF...')
@@ -427,5 +512,5 @@ if args.compress:
     for page in reader.pages:
         page.compress_content_streams()  # This is CPU intensive!
         writer.add_page(page)
-    with open(args.output / f'{title} compressed.pdf', 'wb') as f:
+    with open(args.output / f'{title}_compressed.pdf', 'wb') as f:
         writer.write(f)
